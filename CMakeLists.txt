@@ -64,6 +64,7 @@ set (sources
         src/render.cpp
         src/pipeline/segmentation.cpp
         src/pipeline/join.cpp
+        src/pipeline/transcode.cpp
 )
 
 add_library (${PROJECT_NAME} SHARED ${sources})

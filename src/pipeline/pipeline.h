@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../render.h"
+
 #include <deque>
 #include <condition_variable>
 #include <vector>
@@ -90,7 +92,8 @@ void segment(
 void transcode(
     PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *input_queue,
     PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *output_queue,
-    int quality);
+    int quality,
+    cut_list *cut_list);
 
 void join(
     PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *input_queue,
