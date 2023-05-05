@@ -13,7 +13,7 @@ void segment(
 )
 {
   AVFormatContext *inputFormatContext = NULL;
-  AVPacket packet;
+  AVPacket pkt;
   int videoStreamIndex = -1;
   int audioStreamIndex = -1;
   std::vector<AVPacket *> *pipeline_packets = NULL;
@@ -27,8 +27,6 @@ void segment(
     std::cout << "error finding stream info" << std::endl;
     return;
   }
-
-  av_dump_format(inputFormatContext, 0, file, 0);
 
   for (unsigned int i = 0; i < inputFormatContext->nb_streams; i++) {
     if (inputFormatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
@@ -66,36 +64,30 @@ void segment(
     return;
   }
 
-  std::cout << videoCodecParametersCopy << std::endl;
-
   METADATA *metadata = new METADATA();
   metadata->video_stream = inputFormatContext->streams[videoStreamIndex];
   metadata->audio_stream = inputFormatContext->streams[audioStreamIndex];
-  metadata->video_codec_parameters = videoCodecParametersCopy;
-  metadata->audio_codec_parameters = audioCodecParametersCopy;
   METADATA** metadata_ptr = new METADATA*(metadata);
   segment_queue->set_special(metadata_ptr);
 
-  int cnt = 0;
-
-  // sleep for 15 seconds
-
-  while (av_read_frame(inputFormatContext, &packet) == 0) {
-    cnt++;
-    if (packet.stream_index != videoStreamIndex && packet.stream_index != audioStreamIndex)
+  while (av_read_frame(inputFormatContext, &pkt) == 0) {
+    if (pkt.stream_index != videoStreamIndex && pkt.stream_index != audioStreamIndex)
     {
-      av_packet_unref(&packet);
+      av_packet_unref(&pkt);
       // Skip this packet
       continue;
     }
 
+    AVPacket *packet = new AVPacket();
+    av_packet_ref(packet, &pkt);
+
     // Check if we need to start a new segment
-    if (packet.flags & AV_PKT_FLAG_KEY) {
+    if (packet->stream_index == videoStreamIndex && packet->flags & AV_PKT_FLAG_KEY) {
       // Send the current segment in the pipeline
       
       if (pipeline_packets) {
         QUEUE_ITEM *item = new QUEUE_ITEM();
-        item->packets = *pipeline_packets;
+        item->packets = pipeline_packets;
         segment_queue->push(item, 1);
       }
 
@@ -104,13 +96,13 @@ void segment(
     }
 
     if (!pipeline_packets) {
-      av_packet_unref(&packet);
+      av_packet_unref(packet);
       std::cout << "error pipeline_packets is null" << std::endl;
       return;
     }
-
-    pipeline_packets->push_back(&packet);
+    
+    pipeline_packets->push_back(packet);
   }
 
-  std::cout << cnt << std::endl;
+  segment_queue->set_done();
 }

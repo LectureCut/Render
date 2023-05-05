@@ -75,14 +75,12 @@ public:
 };
 
 struct QUEUE_ITEM {
-  std::vector<AVPacket*> packets;
+  std::vector<AVPacket*> *packets;
 };
 
 struct METADATA {
   AVStream *video_stream;
   AVStream *audio_stream;
-  AVCodecParameters *video_codec_parameters;
-  AVCodecParameters *audio_codec_parameters;
 };
 
 void segment(
