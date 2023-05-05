@@ -5,8 +5,6 @@ extern "C" {
   #include "libavformat/avformat.h"
 }
 
-#include <iostream>
-
 void segment(
   const char *file,
   PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *segment_queue
@@ -19,13 +17,11 @@ void segment(
   std::vector<AVPacket *> *pipeline_packets = NULL;
 
   if (avformat_open_input(&inputFormatContext, file, NULL, NULL) < 0) {
-    std::cout << "error opening input file" << std::endl;
-    return;
+    throw std::runtime_error("error opening input file");
   }
 
   if (avformat_find_stream_info(inputFormatContext, NULL) < 0) {
-    std::cout << "error finding stream info" << std::endl;
-    return;
+    throw std::runtime_error("error finding stream info");
   }
 
   for (unsigned int i = 0; i < inputFormatContext->nb_streams; i++) {
@@ -37,31 +33,21 @@ void segment(
   }
 
   if (videoStreamIndex == -1 || audioStreamIndex == -1) {
-    std::cout << "error finding video or audio stream" << std::endl;
-    return;
-  }
-
-  if (inputFormatContext->streams[videoStreamIndex] == nullptr ||
-      inputFormatContext->streams[audioStreamIndex] == nullptr) {
-    std::cout << "error finding video or audio stream" << std::endl;
-    return;
+    throw std::runtime_error("error finding video or audio stream");
   }
 
   if (inputFormatContext->streams[videoStreamIndex]->codecpar == nullptr ||
       inputFormatContext->streams[audioStreamIndex]->codecpar == nullptr) {
-    std::cout << "error finding video or audio codec parameters" << std::endl;
-    return;
+    throw std::runtime_error("error finding video or audio codec parameters");
   }
 
   AVCodecParameters *videoCodecParametersCopy = avcodec_parameters_alloc();
   AVCodecParameters *audioCodecParametersCopy = avcodec_parameters_alloc();
   if (avcodec_parameters_copy(videoCodecParametersCopy, inputFormatContext->streams[videoStreamIndex]->codecpar) < 0) {
-    std::cout << "error copying video codec parameters" << std::endl;
-    return;
+    throw std::runtime_error("error copying video codec parameters");
   }
   if (avcodec_parameters_copy(audioCodecParametersCopy, inputFormatContext->streams[audioStreamIndex]->codecpar) < 0) {
-    std::cout << "error copying audio codec parameters" << std::endl;
-    return;
+    throw std::runtime_error("error copying audio codec parameters");
   }
 
   METADATA *metadata = new METADATA();
@@ -78,8 +64,7 @@ void segment(
       continue;
     }
 
-    AVPacket *packet = new AVPacket();
-    av_packet_ref(packet, &pkt);
+    AVPacket *packet = av_packet_clone(&pkt);
 
     // Check if we need to start a new segment
     if (packet->stream_index == videoStreamIndex && packet->flags & AV_PKT_FLAG_KEY) {
@@ -97,8 +82,7 @@ void segment(
 
     if (!pipeline_packets) {
       av_packet_unref(packet);
-      std::cout << "error pipeline_packets is null" << std::endl;
-      return;
+      throw std::runtime_error("error starting new segment");
     }
     
     pipeline_packets->push_back(packet);

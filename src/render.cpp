@@ -28,13 +28,13 @@ void render(
 )
 {
   PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> segment_queue;
-  // PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> join_queue;
+  PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> join_queue;
 
   std::thread segment_thread(segment, file, &segment_queue);
-  // std::thread transcode_thread(transcode, &segment_queue, &join_queue, quality);
-  // std::thread join_thread(join, &join_queue, output);
-  std::thread join_thread(join, &segment_queue, output);
+  std::thread transcode_thread(transcode, &segment_queue, &join_queue, quality, &cuts);
+  std::thread join_thread(join, &join_queue, output);
 
   segment_thread.join();
+  transcode_thread.join();
   join_thread.join();
 }
