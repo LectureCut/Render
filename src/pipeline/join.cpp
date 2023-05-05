@@ -37,8 +37,6 @@ void join(
 
   out_ctx->pb = io_ctx;
 
-  std::cout << "output file opened" << std::endl;
-
   AVStream *videoSteam = avformat_new_stream(out_ctx, nullptr);
   AVStream *audioStream = avformat_new_stream(out_ctx, nullptr);
 
@@ -47,55 +45,42 @@ void join(
     return;
   }
 
-  std::cout << "streams created" << std::endl;
-
   METADATA **metadata_ptr;
   input_queue->get_special(&metadata_ptr);
   METADATA *metadata = *metadata_ptr;
 
-  if (metadata == nullptr || metadata->video_stream == nullptr || metadata->audio_stream == nullptr) {
-    std::cout << "error getting metadata" << std::endl;
-    return;
-  }
-
-  if (metadata->video_codec_parameters == nullptr || metadata->audio_codec_parameters == nullptr) {
-    std::cout << "error getting codec params" << std::endl;
-    return;
-  }
-
-  if ((ret = avcodec_parameters_copy(videoSteam->codecpar, metadata->video_codec_parameters)) < 0) {
+  if ((ret = avcodec_parameters_copy(videoSteam->codecpar, metadata->video_stream->codecpar)) < 0) {
     std::cout << av_make_error_string(errbuff, 64, ret) << std::endl;
   }
-  if ((ret = avcodec_parameters_copy(audioStream->codecpar, metadata->audio_codec_parameters)) < 0) {
+  if ((ret = avcodec_parameters_copy(audioStream->codecpar, metadata->audio_stream->codecpar)) < 0) {
     std::cout << av_make_error_string(errbuff, 64, ret) << std::endl;
   }
 
   videoSteam->codecpar->codec_tag = 0;
   audioStream->codecpar->codec_tag = 0;
 
-  av_dump_format(out_ctx, 0, filename, 1);
-
   videoSteam->time_base = metadata->video_stream->time_base;
   audioStream->time_base = metadata->audio_stream->time_base;
 
-  // videoSteam->index = metadata->video_stream->index;
-  // audioStream->index = metadata->audio_stream->index;
+  videoSteam->index = metadata->video_stream->index;
+  audioStream->index = metadata->audio_stream->index;
 
   avformat_write_header(out_ctx, NULL);
 
-  std::cout << "header written" << std::endl;
+  QUEUE_ITEM in_ctx[1];
 
-  QUEUE_ITEM in_ctx;
-
+  bool take = true;
   // Loop through each input context and write its packets to the output file
-  while (input_queue->pop(&in_ctx, 1) == 1) {
-    for (auto pkt : in_ctx.packets) {
-      if (pkt->stream_index == metadata->video_stream->index)
-        pkt->stream_index = videoSteam->index;
-      else if (pkt->stream_index == metadata->audio_stream->index)
-        pkt->stream_index = audioStream->index;
-      else
-        std::cout << "unknown stream index" << std::endl;
+  while (input_queue->pop(in_ctx, 1) == 1) {
+    if (!take) {
+      for (auto pkt : *in_ctx->packets) {
+        av_packet_unref(pkt);
+      }
+      take = true;
+      continue;
+    }
+    take = false;
+    for (auto pkt : *in_ctx->packets) {
       av_interleaved_write_frame(out_ctx, pkt);
       av_packet_unref(pkt);
     }
