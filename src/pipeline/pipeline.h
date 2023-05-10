@@ -5,11 +5,12 @@
 #include <deque>
 #include <condition_variable>
 #include <vector>
+#include <algorithm>
 #include <iostream>
 
 struct AVPacket;
 struct AVStream;
-struct AVCodecParameters;
+struct AVFormatContext;
 
 template <typename T, typename S>
 class PIPELINE_QUEUE
@@ -17,32 +18,35 @@ class PIPELINE_QUEUE
   std::deque<T> queue;
   std::mutex mutex;
   std::condition_variable cv;
-  bool done = false;
+  std::vector<bool> done = {};
   S *special = nullptr;
 
 public:
-  void push(T* data, int size) {
+  void push(T* data) {
     std::unique_lock<std::mutex> lock(mutex);
-    cv.wait(lock, [&] { return done || queue.size() < 36; });
-    for (int i = 0; i < size; i++) {
-      queue.push_back(data[i]);
-    }
+    // 36 is arbitrary (should hold around 3 min of video assunming a keyframe every 5 seconds)
+    cv.wait(lock, [&]
+            { return std::all_of(done.begin(), done.end(), [](bool x){ return x; }) ||
+                     queue.size() < 36; });
+
+    queue.push_back(*data);
+
     lock.unlock();
     cv.notify_one();
   }
 
-  int pop(T* data, int size) {
+  bool pop(T* data) {
     std::unique_lock<std::mutex> lock(mutex);
-    cv.wait(lock, [&] { return done || queue.size() >= size; });
-    int i = 0;
-    while (i < size && !queue.empty()) {
-      data[i] = queue.front();
-      queue.pop_front();
-      i++;
-    }
+    cv.wait(lock, [&] { return std::all_of(done.begin(), done.end(), [](bool x){ return x; }) || queue.size() >= 1; });
+    
+    if (queue.size() == 0) return false;
+
+    *data = queue.front();
+    queue.pop_front();
+
     lock.unlock();
     cv.notify_one();
-    return i;
+    return true;
   }
 
   int size() {
@@ -50,14 +54,22 @@ public:
     return queue.size();
   }
 
-  void set_done() {
+  int set_working() {
     std::lock_guard<std::mutex> lock(mutex);
-    done = true;
+    done.push_back(false);
+    return done.size() - 1;
+  }
+
+  void set_done(int index) {
+    std::unique_lock<std::mutex> lock(mutex);
+    done[index] = true;
+    lock.unlock();
+    cv.notify_one();
   }
 
   bool is_done() {
     std::lock_guard<std::mutex> lock(mutex);
-    return done;
+    return std::all_of(done.begin(), done.end(), [](bool x){ return x; });
   }
 
   void set_special(S *special) {
@@ -70,7 +82,7 @@ public:
   // blocks until special is set
   void get_special(S **special) {
     std::unique_lock<std::mutex> lock(mutex);
-    cv.wait(lock, [&] { return done || this->special != nullptr; });
+    cv.wait(lock, [&] { return std::all_of(done.begin(), done.end(), [](bool x){ return x; }) || this->special != nullptr; });
     *special = this->special;
     lock.unlock();
   }
@@ -81,15 +93,24 @@ struct QUEUE_ITEM {
 };
 
 struct METADATA {
+  AVFormatContext *format_ctx;
   AVStream *video_stream;
   AVStream *audio_stream;
 };
 
 void segment(
     const char *filename,
-    PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *output_queue);
+    PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *video_output_queue,
+    PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *audio_output_queue
+);
 
-void transcode(
+void transcode_video(
+    PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *input_queue,
+    PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *output_queue,
+    int quality,
+    cut_list *cut_list);
+
+void transcode_audio(
     PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *input_queue,
     PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *output_queue,
     int quality,

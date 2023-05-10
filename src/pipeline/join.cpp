@@ -54,7 +54,7 @@ void join(
   QUEUE_ITEM in_ctx[1];
 
   // Loop through each input context and write its packets to the output file
-  while (input_queue->pop(in_ctx, 1) == 1) {
+  while (input_queue->pop(in_ctx)) {
     for (auto pkt : *in_ctx->packets) {
       av_interleaved_write_frame(out_ctx, pkt);
       av_packet_unref(pkt);

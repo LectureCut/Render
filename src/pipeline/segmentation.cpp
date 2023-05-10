@@ -7,14 +7,19 @@ extern "C" {
 
 void segment(
   const char *file,
-  PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *segment_queue
+  PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *video_output_queue,
+  PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *audio_output_queue
 )
 {
+  int video_queue_id = video_output_queue->set_working();
+  int audio_queue_id = audio_output_queue->set_working();
+
   AVFormatContext *inputFormatContext = NULL;
   AVPacket pkt;
   int videoStreamIndex = -1;
   int audioStreamIndex = -1;
-  std::vector<AVPacket *> *pipeline_packets = NULL;
+  std::vector<AVPacket *> *video_packets = NULL;
+  std::vector<AVPacket *> *audio_packets = NULL;
 
   if (avformat_open_input(&inputFormatContext, file, NULL, NULL) < 0) {
     throw std::runtime_error("error opening input file");
@@ -51,10 +56,12 @@ void segment(
   }
 
   METADATA *metadata = new METADATA();
+  metadata->format_ctx = inputFormatContext;
   metadata->video_stream = inputFormatContext->streams[videoStreamIndex];
   metadata->audio_stream = inputFormatContext->streams[audioStreamIndex];
   METADATA** metadata_ptr = new METADATA*(metadata);
-  segment_queue->set_special(metadata_ptr);
+  video_output_queue->set_special(metadata_ptr);
+  audio_output_queue->set_special(metadata_ptr);
 
   while (av_read_frame(inputFormatContext, &pkt) == 0) {
     if (pkt.stream_index != videoStreamIndex && pkt.stream_index != audioStreamIndex)
@@ -70,23 +77,34 @@ void segment(
     if (packet->stream_index == videoStreamIndex && packet->flags & AV_PKT_FLAG_KEY) {
       // Send the current segment in the pipeline
       
-      if (pipeline_packets) {
+      if (video_packets) {
         QUEUE_ITEM *item = new QUEUE_ITEM();
-        item->packets = pipeline_packets;
-        segment_queue->push(item, 1);
+        item->packets = video_packets;
+        video_output_queue->push(item);
+      }
+      if (audio_packets) {
+        QUEUE_ITEM *item = new QUEUE_ITEM();
+        item->packets = audio_packets;
+        audio_output_queue->push(item);
       }
 
       // Start a new segment
-      pipeline_packets = new std::vector<AVPacket *>();
+      video_packets = new std::vector<AVPacket *>();
+      audio_packets = new std::vector<AVPacket *>();
     }
 
-    if (!pipeline_packets) {
+    if (!video_packets || !audio_packets) {
       av_packet_unref(packet);
       throw std::runtime_error("error starting new segment");
     }
     
-    pipeline_packets->push_back(packet);
+    if (packet->stream_index == videoStreamIndex) {
+      video_packets->push_back(packet);
+    } else if (packet->stream_index == audioStreamIndex) {
+      audio_packets->push_back(packet);
+    }
   }
 
-  segment_queue->set_done();
+  video_output_queue->set_done(video_queue_id);
+  audio_output_queue->set_done(audio_queue_id);
 }
