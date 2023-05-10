@@ -27,14 +27,17 @@ void render(
     progress_callback *progress
 )
 {
-  PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> segment_queue;
+  PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> segment_video_queue;
+  PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> segment_audio_queue;
   PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> join_queue;
 
-  std::thread segment_thread(segment, file, &segment_queue);
-  std::thread transcode_thread(transcode, &segment_queue, &join_queue, quality, &cuts);
+  std::thread segment_thread(segment, file, &segment_video_queue, &segment_audio_queue);
+  std::thread video_thread(transcode_video, &segment_video_queue, &join_queue, quality, &cuts);
+  std::thread audio_thread(transcode_audio, &segment_audio_queue, &join_queue, quality, &cuts);
   std::thread join_thread(join, &join_queue, output);
 
   segment_thread.join();
-  transcode_thread.join();
+  video_thread.join();
+  audio_thread.join();
   join_thread.join();
 }
