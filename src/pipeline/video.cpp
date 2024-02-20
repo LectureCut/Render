@@ -1,32 +1,21 @@
 #include "pipeline.h"
 
-extern "C" {
-  #include "libavcodec/avcodec.h"
-  #include "libavformat/avformat.h"
+extern "C"
+{
+#include "libavcodec/avcodec.h"
+#include "libavformat/avformat.h"
 }
 
-void transcode_video(
-    PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *input_queue,
-    PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *output_queue,
-    int quality,
-    cut_list *cut_list
-)
+struct local_cut
 {
-  int queue_id = output_queue->set_working();
+  int64_t start;
+  int64_t end;
+};
 
-  // relay metadata
-  METADATA **metadata_ptr;
-  input_queue->get_special(&metadata_ptr);
-  METADATA *metadata = *metadata_ptr;
-  metadata_ptr = new METADATA*(metadata);
-  output_queue->set_special(metadata_ptr);
-
-  // codec setup
-  const AVCodec* decodeCodec = avcodec_find_decoder(metadata->video_stream->codecpar->codec_id);
-  const AVCodec* encodeCodec = avcodec_find_encoder(metadata->video_stream->codecpar->codec_id);
-  AVCodecContext* decodeCtx = avcodec_alloc_context3(decodeCodec);
-  AVCodecContext* encodeCtx = avcodec_alloc_context3(encodeCodec);
-  avcodec_parameters_to_context(decodeCtx, metadata->video_stream->codecpar);
+AVCodecContext *create_encoder_context(METADATA *metadata, int quality)
+{
+  const AVCodec *encodeCodec = avcodec_find_encoder(metadata->video_stream->codecpar->codec_id);
+  AVCodecContext *encodeCtx = avcodec_alloc_context3(encodeCodec);
   avcodec_parameters_to_context(encodeCtx, metadata->video_stream->codecpar);
   encodeCtx->time_base = metadata->video_stream->time_base;
   encodeCtx->width = metadata->video_stream->codecpar->width;
@@ -37,121 +26,238 @@ void transcode_video(
   encodeCtx->qmin = 1;
   encodeCtx->qmax = 1;
   encodeCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-  avcodec_open2(decodeCtx, decodeCodec, 0);
   avcodec_open2(encodeCtx, encodeCodec, 0);
+  return encodeCtx;
+}
+
+void transcode_video(
+    PIPELINE_QUEUE<QUEUE_ITEM, METADATA *> *input_queue,
+    PIPELINE_QUEUE<QUEUE_ITEM, METADATA *> *output_queue,
+    int quality,
+    cut_list *cut_list)
+{
+  int queue_id = output_queue->set_working();
+  int ret;
+  char errbuff[64] = {0};
+
+  // relay metadata
+  METADATA **metadata_ptr;
+  input_queue->get_special(&metadata_ptr);
+  METADATA *metadata = *metadata_ptr;
+  metadata_ptr = new METADATA *(metadata);
+  output_queue->set_special(metadata_ptr);
+
+  std::vector<local_cut> *cuts = new std::vector<local_cut>(cut_list->num_cuts);
+
+  // convert all cuts to time base
+  for (int i = 0; i < cut_list->num_cuts; i++)
+  {
+    cuts->at(i).start = (long double)cut_list->cuts[i].start * metadata->video_stream->time_base.den / metadata->video_stream->time_base.num;
+    cuts->at(i).end = (long double)cut_list->cuts[i].end * metadata->video_stream->time_base.den / metadata->video_stream->time_base.num;
+  }
+
+  // codec setup
+  const AVCodec *decodeCodec = avcodec_find_decoder(metadata->video_stream->codecpar->codec_id);
+  AVCodecContext *decodeCtx = avcodec_alloc_context3(decodeCodec);
+  avcodec_parameters_to_context(decodeCtx, metadata->video_stream->codecpar);
+  avcodec_open2(decodeCtx, decodeCodec, 0);
 
   // loop prep
   QUEUE_ITEM in_ctx[1];
   int64_t time_skipped = 0;
 
-  cut *last_cut = cut_list->cuts + (cut_list->num_cuts - 1);
-  cut *current_cut = cut_list->cuts;
+  auto current_cut = cuts->begin();
+
+  std::vector<local_cut> segment_cuts = std::vector<local_cut>();
 
   while (input_queue->pop(in_ctx))
   {
+    int64_t segment_start = in_ctx->packets->front()->pts;
+    int64_t segment_end = in_ctx->packets->back()->pts + in_ctx->packets->back()->duration;
+
+    // find all cuts in this segment
+    segment_cuts.clear();
+    while (current_cut != cuts->end() && current_cut->start < segment_end)
+    {
+      segment_cuts.push_back(*current_cut);
+      if (current_cut->end > segment_end)
+      {
+        break;
+      }
+      current_cut++;
+    }
+
+    if (segment_cuts.size() == 0)
+    {
+      // no cuts in this segment, skip everything
+      for (AVPacket *packet : *in_ctx->packets)
+      {
+        time_skipped += packet->duration;
+      }
+      continue;
+    }
+
+    if (segment_cuts.size() == 1 && segment_cuts.front().start <= segment_start && segment_cuts.front().end >= segment_end)
+    {
+      // only one cut in this segment, and it covers the whole segment
+      // just pass the segment through
+      for (AVPacket *packet : *in_ctx->packets)
+      {
+        packet->pts -= time_skipped;
+        packet->dts -= time_skipped;
+      }
+      output_queue->push(in_ctx);
+      continue;
+    }
+
     QUEUE_ITEM *out_ctx = new QUEUE_ITEM[1];
-    out_ctx->packets = new std::vector<AVPacket*>();
+    out_ctx->packets = new std::vector<AVPacket *>();
 
-    bool has_keyframe = false;
+    // ========================================================
+    // sadly transcode everything, because B frames exist... :(
+    // ========================================================
 
-    for (AVPacket *packet : *in_ctx->packets) {
-      // TODO: remove this
-      // detect B frames
-      if (packet->dts != packet->pts) {
-        std::cout << "B frame detected" << std::endl;
+    std::vector<AVFrame *> frames = std::vector<AVFrame *>();
+
+    // decode all packets in this segment
+    for (AVPacket *packet : *in_ctx->packets)
+    {
+      if ((ret = avcodec_send_packet(decodeCtx, packet)) != 0)
+      {
+        av_make_error_string(errbuff, 64, ret);
+        std::cout << "Error sending packet: " << errbuff << std::endl;
         exit(1);
       }
-      
 
-      // check if we're in a cut
-      // convert pts to seconds
-      int64_t packet_start_time = packet->pts * metadata->video_stream->time_base.num / metadata->video_stream->time_base.den;
-      int64_t packet_end_time = packet_start_time + packet->duration * metadata->video_stream->time_base.num / metadata->video_stream->time_base.den;
+      AVFrame *frame = av_frame_alloc();
+      if ((ret = avcodec_receive_frame(decodeCtx, frame)) != 0)
+      {
+        if (ret != AVERROR(EAGAIN))
+        {
+          av_make_error_string(errbuff, 64, ret);
+          std::cout << "Error receiving frame: " << errbuff << std::endl;
+          exit(1);
+        }
+      }
+      frames.push_back(frame);
+    }
 
-      // seek to the next cut if we're past the current one
-      while (current_cut < last_cut && packet_start_time > current_cut->end) {
-        current_cut++;
+    // receive all frames in this segment
+    while (true)
+    {
+      AVFrame *frame = av_frame_alloc();
+      if ((ret = avcodec_receive_frame(decodeCtx, frame)) != 0)
+      {
+        if (ret != AVERROR(EAGAIN))
+        {
+          av_make_error_string(errbuff, 64, ret);
+          std::cout << "Error receiving frame: " << errbuff << std::endl;
+          exit(1);
+        }
+        break;
+      }
+      frames.push_back(frame);
+    }
+
+    if ((*in_ctx->packets).size() != frames.size())
+    {
+      std::cout << "Warning: packet count does not match frame count" << std::endl;
+      if ((*in_ctx->packets).size() < frames.size())
+      {
+        std::cout << "Warning: more frames than packets, frames will be skipped" << std::endl;
+      }
+      else
+      {
+        std::cout << "Warning: more packets than frames, frames will be duplicated" << std::endl;
+        for (int i = frames.size(); i < (*in_ctx->packets).size(); i++)
+        {
+          frames.push_back(av_frame_clone(frames.back()));
+        }
+      }
+    }
+
+    // sort packets by pts (because some idiot decided to make B frames)
+    std::sort((*in_ctx->packets).begin(), (*in_ctx->packets).end(), [](const AVPacket *a, const AVPacket *b) -> bool
+              { return a->pts < b->pts; });
+
+    // TODO: check if all this is needed, seems like a lot of work for nothing
+    // Open encoder
+    AVCodecContext *encoder = create_encoder_context(metadata, quality);
+
+    auto current_segment_cut = segment_cuts.begin();
+    bool cut_has_keyframe = false;
+    bool new_encoder = false;
+
+    for (int i = 0; i < frames.size(); i++)
+    {
+      AVFrame *frame = frames[i];
+      AVPacket *packet = (*in_ctx->packets)[i];
+
+      int64_t packet_start_time = packet->pts;
+      int64_t packet_end_time = packet->pts + packet->duration;
+
+      // seek next segment cut
+      while (current_segment_cut != segment_cuts.end() && current_segment_cut->end < packet_start_time)
+      {
+        if (current_segment_cut == segment_cuts.end() - 1)
+        {
+          break;
+        }
+        current_segment_cut++;
+        cut_has_keyframe = false;
+        new_encoder = true;
+      }
+      if (new_encoder)
+      {
+        // close old encoder
+        avcodec_free_context(&encoder);
+        // open new encoder
+        encoder = create_encoder_context(metadata, quality);
       }
 
-      if (packet_end_time > current_cut->start && packet_start_time < current_cut->end) {
-        // we're in a cut, keep this packet
+      // check if we're in a cut
+      if (packet_end_time >= current_segment_cut->start && packet_start_time <= current_segment_cut->end)
+      {
+        // we're in a cut, send the frame to the encoder
 
         // if we haven't exported a keyframe yet, check if we can use the original one or
         // if we need to make a new one
-        if (!has_keyframe && packet != in_ctx->packets->front()) {
-          int ret;
-          char errbuff[64] = {0};
-
-          AVFrame *final_frame = nullptr;
-          AVFrame *tmp_frame = av_frame_alloc();
-          bool got_frame = false;
-          for (auto pkt = in_ctx->packets->begin(); *pkt != packet; pkt++) {
-            if ((ret = avcodec_send_packet(decodeCtx, *pkt)) != 0) {
-              av_make_error_string(errbuff, 64, ret);
-              std::cout << "Error sending packet: " << errbuff << std::endl;
-              exit(1);
-            }
-            if ((ret = avcodec_receive_frame(decodeCtx, tmp_frame)) == 0) {
-              final_frame = av_frame_clone(tmp_frame);
-              got_frame = true;
-            } else {
-              av_make_error_string(errbuff, 64, ret);
-              std::cout << "Error receiving frame: " << errbuff << std::endl;
-              if (ret != AVERROR(EAGAIN)) exit(1);
-            }
+        if (!cut_has_keyframe)
+        {
+          frame->pict_type = AV_PICTURE_TYPE_I;
+          cut_has_keyframe = true;
+        }
+        av_frame_make_writable(frame);
+        if ((ret = avcodec_send_frame(encoder, frame)) != 0)
+        {
+          av_make_error_string(errbuff, 64, ret);
+          std::cout << "Error sending frame: " << errbuff << std::endl;
+          exit(1);
+        }
+        av_frame_free(&frame);
+        AVPacket *encoded_packet = new AVPacket[1];
+        av_init_packet(encoded_packet);
+        if ((ret = avcodec_receive_packet(encoder, encoded_packet)) != 0)
+        {
+          if (ret != AVERROR(EAGAIN))
+          {
+            av_make_error_string(errbuff, 64, ret);
+            std::cout << "Error receiving packet: " << errbuff << std::endl;
+            exit(1);
           }
-          AVPacket *keyframe = new AVPacket[1];
-          if (!got_frame) {
-            std::cout << "Couldn't find keyframe, using original" << std::endl;
-            // NOTE: should never happen on correct input
-            keyframe = *in_ctx->packets->begin();
-          } else {
-            final_frame->pict_type = AV_PICTURE_TYPE_I;
-            av_frame_make_writable(final_frame);
-            if ((ret = avcodec_send_frame(encodeCtx, final_frame)) != 0) {
-              av_make_error_string(errbuff, 64, ret);
-              std::cout << "Error sending frame: " << errbuff << std::endl;
-              exit(1);
-            }
-            av_init_packet(keyframe);
-            while (avcodec_receive_packet(encodeCtx, keyframe) == 0);
-          }
-
-          packet->data = keyframe->data;
-          packet->size = keyframe->size;
-          packet->flags |= AV_PKT_FLAG_KEY;
-          has_keyframe = true;
+          std::cout << "No packet received" << std::endl;
+          continue;
         }
-
-        packet->dts -= time_skipped;
-        packet->pts -= time_skipped;
-
-        if (packet_start_time < current_cut->start) {
-          // need to shorten duration
-          int64_t offset = current_cut->start - packet_start_time;
-          // convert offset to output stream time base
-          offset = offset * metadata->video_stream->time_base.den / metadata->video_stream->time_base.num;
-          packet->duration -= offset;
-          time_skipped += offset;
-        }
-
-        if (packet_end_time > current_cut->end) {
-          // need to shorten duration
-          int64_t offset = packet_end_time - current_cut->end;
-          // convert offset to output stream time base
-          offset = offset * metadata->video_stream->time_base.den / metadata->video_stream->time_base.num;
-          packet->duration -= offset;
-          time_skipped += offset;
-        }
-
-        out_ctx->packets->push_back(packet);
-
-        continue;
+        encoded_packet->pts = packet->pts - time_skipped;
+        encoded_packet->dts = encoded_packet->pts;
+        out_ctx->packets->push_back(encoded_packet);
+      }
+      else
+      {
+        time_skipped += packet->duration;
       }
 
-      time_skipped += packet->duration;
-      // TODO: unref later
-      // av_packet_free(&packet);
+      av_packet_free(&packet);
     }
 
     // delete in_ctx->packets;

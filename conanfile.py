@@ -1,6 +1,6 @@
 import contextlib
 from conan import ConanFile, tools
-from conan.tools.cmake import CMake, CMakeToolchain
+from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 from conan.tools.files import load, copy
 
 class Generator(ConanFile):
@@ -18,7 +18,7 @@ class Generator(ConanFile):
   def generate(self):
     tc = CMakeToolchain(self)
     if self.settings.os == "Windows":
-      tc.generator = "Visual Studio 16"
+      tc.generator = "Visual Studio 17"
     tc.blocks["cppstd"].values = {"cppstd": "20"}
     tc.generate()
 
@@ -30,6 +30,10 @@ class Generator(ConanFile):
   def source(self):
     # Check that we can see that the CMakeLists.txt is inside the source folder
     load(self, "CMakeLists.txt")
+
+  def layout(self):
+    cmake_layout(self)
+    self.folders.build = "build"
 
   def configure(self):
     self.options["ffmpeg"].shared = False
@@ -47,6 +51,7 @@ class Generator(ConanFile):
     self.options["ffmpeg"].with_lzma = False
     self.options["ffmpeg"].with_libiconv = False
     self.options["ffmpeg"].with_freetype = False
+    self.options["ffmpeg"].with_libdav1d = False
     self.options["ffmpeg"].with_openjpeg = True
     self.options["ffmpeg"].with_openh264 = True
     self.options["ffmpeg"].with_opus = False
@@ -64,6 +69,7 @@ class Generator(ConanFile):
     self.options["ffmpeg"].with_pulse = False
     self.options["ffmpeg"].with_vaapi = False
     self.options["ffmpeg"].with_vdpau = False
+    self.options["ffmpeg"].with_libaom = False
     self.options["ffmpeg"].with_xcb = False
     self.options["ffmpeg"].with_appkit = False
     self.options["ffmpeg"].with_avfoundation = False
@@ -71,6 +77,8 @@ class Generator(ConanFile):
     self.options["ffmpeg"].with_audiotoolbox = False
     self.options["ffmpeg"].with_videotoolbox = False
     self.options["ffmpeg"].with_programs = False
+    self.options["ffmpeg"].with_libsvtav1 = False
+    self.options["ffmpeg"].with_openjpeg = False
     
   def build(self):
     cmake = CMake(self)
