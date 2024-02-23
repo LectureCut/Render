@@ -52,7 +52,7 @@ class Generator(ConanFile):
     self.options["ffmpeg"].with_libiconv = False
     self.options["ffmpeg"].with_freetype = False
     self.options["ffmpeg"].with_libdav1d = False
-    self.options["ffmpeg"].with_openjpeg = True
+    self.options["ffmpeg"].with_openjpeg = False
     self.options["ffmpeg"].with_openh264 = True
     self.options["ffmpeg"].with_opus = False
     self.options["ffmpeg"].with_vorbis = False
@@ -78,7 +78,6 @@ class Generator(ConanFile):
     self.options["ffmpeg"].with_videotoolbox = False
     self.options["ffmpeg"].with_programs = False
     self.options["ffmpeg"].with_libsvtav1 = False
-    self.options["ffmpeg"].with_openjpeg = False
     
   def build(self):
     cmake = CMake(self)
