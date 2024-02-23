@@ -49,8 +49,6 @@ find_library(AVUTIL_LIBRARY avutil REQUIRED)
 
 find_library(SWRESAMPLE_LIBRARY swresample REQUIRED)
 
-find_library(OPENJPEG_LIBRARY openjp2 REQUIRED)
-
 find_library(OPENH264_LIBRARY openh264 REQUIRED)
 
 find_library(X264_LIBRARY x264 REQUIRED)
@@ -79,7 +77,6 @@ target_link_libraries(${PROJECT_NAME}
         ${AVFORMAT_LIBRARY}
         ${AVUTIL_LIBRARY}
         ${SWRESAMPLE_LIBRARY}
-        ${OPENJPEG_LIBRARY}
         ${OPENH264_LIBRARY}
         ${X264_LIBRARY}
         ${WINDOWS_LIBS}
