@@ -19,14 +19,32 @@ void init()
   avformat_network_init();
 }
 
+ArgumentList get_arguments()
+{
+  Argument *args = new Argument[1]{
+    { 'q', "quality", "The quality of the output video", false, false }
+  };
+
+  return { 1, args };
+}
+
 void render(
     const char *file,
     const char *output,
     cut_list cuts,
-    int quality,
+    ArgumentResultList args,
     progress_callback *progress
 )
 {
+  int quality = 23;
+  for (int i = 0; i < args.num_args; i++)
+  {
+    if (strcmp(args.args[i].name, "quality") == 0)
+    {
+      quality = atoi(args.args[i].value);
+    }
+  }
+
   PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> segment_video_queue;
   PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> segment_audio_queue;
   PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> join_queue;
