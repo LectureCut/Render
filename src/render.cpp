@@ -7,19 +7,19 @@ extern "C" {
   #include "libavformat/avformat.h"
 }
 
-const char* version()
+const char* version(error_callback* _)
 {
   return VERSION;
 }
 
-void init()
+void init(error_callback* _)
 {
   // av_log_set_level(AV_LOG_QUIET);
   
   avformat_network_init();
 }
 
-ArgumentList get_arguments()
+ArgumentList get_arguments(error_callback* _)
 {
   Argument *args = new Argument[1]{
     { 'q', "quality", "The quality of the output video", false, false }
@@ -33,7 +33,8 @@ void render(
     const char *output,
     cut_list cuts,
     ArgumentResultList args,
-    progress_callback *progress
+    progress_callback *progress,
+    error_callback *_
 )
 {
   int quality = 23;

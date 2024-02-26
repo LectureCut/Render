@@ -15,9 +15,11 @@
 extern "C" {
 #endif
 
-  EXPORT const char* version();
+  typedef void error_callback(const char*);
+  
+  EXPORT const char *version(error_callback* error);
 
-  EXPORT void init();
+  EXPORT void init(error_callback* error);
 
   struct cut
   {
@@ -48,7 +50,8 @@ extern "C" {
     const char *output,
     cut_list cuts,
     ArgumentResultList args,
-    progress_callback *progress
+    progress_callback *progress,
+    error_callback *error
   );
 
   struct Argument {
@@ -64,7 +67,7 @@ extern "C" {
     Argument* args;
   };
 
-  EXPORT ArgumentList get_arguments();
+  EXPORT ArgumentList get_arguments(error_callback* error);
 
 #ifdef __cplusplus
 }
