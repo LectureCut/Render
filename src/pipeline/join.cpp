@@ -51,7 +51,7 @@ void join(
 
   avformat_write_header(out_ctx, NULL);
 
-  QUEUE_ITEM in_ctx[1];
+  QUEUE_ITEM* in_ctx = new QUEUE_ITEM();
 
   // Loop through each input context and write its packets to the output file
   while (input_queue->pop(in_ctx)) {
@@ -59,7 +59,9 @@ void join(
       av_interleaved_write_frame(out_ctx, pkt);
       av_packet_unref(pkt);
     }
+    delete in_ctx->packets;
   }
+  delete in_ctx;
 
   // // Write the trailer to the output file
   av_write_trailer(out_ctx);

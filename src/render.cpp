@@ -14,7 +14,7 @@ const char* version(error_callback* _)
 
 void init(error_callback* _)
 {
-  // av_log_set_level(AV_LOG_QUIET);
+  av_log_set_level(AV_LOG_VERBOSE);
   
   avformat_network_init();
 }

@@ -1,4 +1,7 @@
 #include "pipeline.h"
+#include <ranges>
+#include <syncstream>
+#include <thread>
 
 extern "C"
 {
@@ -12,23 +15,7 @@ struct local_cut
   int64_t end;
 };
 
-AVCodecContext *create_encoder_context(METADATA *metadata, int quality)
-{
-  const AVCodec *encodeCodec = avcodec_find_encoder(metadata->video_stream->codecpar->codec_id);
-  AVCodecContext *encodeCtx = avcodec_alloc_context3(encodeCodec);
-  avcodec_parameters_to_context(encodeCtx, metadata->video_stream->codecpar);
-  encodeCtx->time_base = metadata->video_stream->time_base;
-  encodeCtx->width = metadata->video_stream->codecpar->width;
-  encodeCtx->height = metadata->video_stream->codecpar->height;
-  encodeCtx->gop_size = 12;
-  encodeCtx->max_b_frames = 2;
-  encodeCtx->bit_rate = metadata->video_stream->codecpar->bit_rate;
-  encodeCtx->qmin = 1;
-  encodeCtx->qmax = 1;
-  encodeCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-  avcodec_open2(encodeCtx, encodeCodec, 0);
-  return encodeCtx;
-}
+const static AVRational CUT_TIMEBASE = av_make_q(1, 100);
 
 void transcode_video(
     PIPELINE_QUEUE<QUEUE_ITEM, METADATA *> *input_queue,
@@ -36,234 +23,145 @@ void transcode_video(
     int quality,
     cut_list *cut_list)
 {
-  int queue_id = output_queue->set_working();
-  int ret;
+  std::osyncstream cout_sync(std::cout);
+
+  size_t queue_id = output_queue->set_working();
   char errbuff[64] = {0};
 
   // relay metadata
   METADATA **metadata_ptr;
   input_queue->get_special(&metadata_ptr);
-  METADATA *metadata = *metadata_ptr;
-  metadata_ptr = new METADATA *(metadata);
   output_queue->set_special(metadata_ptr);
+  METADATA *metadata = *metadata_ptr;
 
-  std::vector<local_cut> *cuts = new std::vector<local_cut>(cut_list->num_cuts);
+  const AVRational native_stream_timebase = metadata->video_stream->time_base;
+
+  auto cuts = std::vector<local_cut>(cut_list->num_cuts);
+  auto cut_list_span = std::span<cut>(cut_list->cuts, cut_list->num_cuts);
 
   // convert all cuts to time base
+  int64_t offset = (metadata->video_stream->start_time == AV_NOPTS_VALUE) ? 0 : metadata->video_stream->start_time;
   for (int i = 0; i < cut_list->num_cuts; i++)
   {
-    cuts->at(i).start = (long double)cut_list->cuts[i].start * metadata->video_stream->time_base.den / metadata->video_stream->time_base.num;
-    cuts->at(i).end = (long double)cut_list->cuts[i].end * metadata->video_stream->time_base.den / metadata->video_stream->time_base.num;
+    cuts[i].start = 
+      av_rescale_q(cut_list->cuts[i].start, CUT_TIMEBASE, native_stream_timebase) + offset;
+    cuts[i].end = 
+      av_rescale_q(cut_list->cuts[i].end, CUT_TIMEBASE, native_stream_timebase) + offset;
   }
 
-  // codec setup
-  const AVCodec *decodeCodec = avcodec_find_decoder(metadata->video_stream->codecpar->codec_id);
-  AVCodecContext *decodeCtx = avcodec_alloc_context3(decodeCodec);
-  avcodec_parameters_to_context(decodeCtx, metadata->video_stream->codecpar);
-  avcodec_open2(decodeCtx, decodeCodec, 0);
+  cout_sync << "Video Timebase: " << native_stream_timebase.num << "/" << native_stream_timebase.den << std::endl;
 
   // loop prep
-  QUEUE_ITEM in_ctx[1];
+  QUEUE_ITEM* in_ctx = new QUEUE_ITEM();
+  
+  auto first_cut_in_cur_seg = cuts.begin();
+  auto cut_to_be_exited = cuts.begin();
+  std::vector<local_cut> segment_cuts {};
+
   int64_t time_skipped = 0;
-
-  auto current_cut = cuts->begin();
-
-  std::vector<local_cut> segment_cuts = std::vector<local_cut>();
+  int64_t centiseconds_kept_before_seg = 0;
+  int64_t dts_previous = std::numeric_limits<int64_t>::min();
 
   while (input_queue->pop(in_ctx))
   {
-    int64_t segment_start = in_ctx->packets->front()->pts;
-    int64_t segment_end = in_ctx->packets->back()->pts + in_ctx->packets->back()->duration;
+    auto segment_packets_first = in_ctx->packets->front();
+    auto segment_packets_last = in_ctx->packets->back();
+    int64_t segment_start = segment_packets_first->pts;
+    int64_t segment_end = segment_packets_last->pts + segment_packets_last->duration;
 
     // find all cuts in this segment
     segment_cuts.clear();
-    while (current_cut != cuts->end() && current_cut->start < segment_end)
+    while (first_cut_in_cur_seg != cuts.end() && first_cut_in_cur_seg->start < segment_end)
     {
-      segment_cuts.push_back(*current_cut);
-      if (current_cut->end > segment_end)
-      {
+      segment_cuts.push_back(*first_cut_in_cur_seg);
+      if (cut_to_be_exited->end <= segment_start) {
+        const auto& last_cut_in_prev_seg = cut_list_span[cut_to_be_exited-cuts.begin()];
+        centiseconds_kept_before_seg += last_cut_in_prev_seg.end - last_cut_in_prev_seg.start;
+        cut_to_be_exited++;
+      }
+      if (first_cut_in_cur_seg->end > segment_end)
         break;
-      }
-      current_cut++;
+      first_cut_in_cur_seg++;
     }
 
-    if (segment_cuts.size() == 0)
+    if (segment_cuts.empty()) // segment will be removed entirely 
     {
-      // no cuts in this segment, skip everything
       for (AVPacket *packet : *in_ctx->packets)
-      {
         time_skipped += packet->duration;
-      }
-      continue;
     }
-
-    if (segment_cuts.size() == 1 && segment_cuts.front().start <= segment_start && segment_cuts.front().end >= segment_end)
+    else if (segment_cuts.size() == 1 && segment_cuts.front().start <= segment_start && segment_cuts.front().end >= segment_end) // segment  will be kept
     {
-      // only one cut in this segment, and it covers the whole segment
-      // just pass the segment through
       for (AVPacket *packet : *in_ctx->packets)
       {
         packet->pts -= time_skipped;
         packet->dts -= time_skipped;
+
+        if (packet->dts <= dts_previous) // if decoding timestamps are not strictly monotonically rising
+          packet->dts = dts_previous + 1;
+        dts_previous = packet->dts;
       }
+
       output_queue->push(in_ctx);
-      continue;
     }
+    else { // segment will be partially kept
+      auto out_ctx = new QUEUE_ITEM();
+      out_ctx->packets = new std::vector<AVPacket *>();
 
-    QUEUE_ITEM *out_ctx = new QUEUE_ITEM[1];
-    out_ctx->packets = new std::vector<AVPacket *>();
-
-    // ========================================================
-    // sadly transcode everything, because B frames exist... :(
-    // ========================================================
-
-    std::vector<AVFrame *> frames = std::vector<AVFrame *>();
-
-    // decode all packets in this segment
-    for (AVPacket *packet : *in_ctx->packets)
-    {
-      if ((ret = avcodec_send_packet(decodeCtx, packet)) != 0)
+      for (auto &packet : *in_ctx->packets)
       {
-        av_make_error_string(errbuff, 64, ret);
-        std::cout << "Error sending packet: " << errbuff << std::endl;
-        exit(1);
-      }
-
-      AVFrame *frame = av_frame_alloc();
-      if ((ret = avcodec_receive_frame(decodeCtx, frame)) != 0)
-      {
-        if (ret != AVERROR(EAGAIN))
+        // if packet pts after last cut in segment, it can be dropped
+        if (packet->pts > (--segment_cuts.end())->end)
         {
-          av_make_error_string(errbuff, 64, ret);
-          std::cout << "Error receiving frame: " << errbuff << std::endl;
-          exit(1);
-        }
-      }
-      frames.push_back(frame);
-    }
-
-    // receive all frames in this segment
-    while (true)
-    {
-      AVFrame *frame = av_frame_alloc();
-      if ((ret = avcodec_receive_frame(decodeCtx, frame)) != 0)
-      {
-        if (ret != AVERROR(EAGAIN))
-        {
-          av_make_error_string(errbuff, 64, ret);
-          std::cout << "Error receiving frame: " << errbuff << std::endl;
-          exit(1);
-        }
-        break;
-      }
-      frames.push_back(frame);
-    }
-
-    if ((*in_ctx->packets).size() != frames.size())
-    {
-      std::cout << "Warning: packet count does not match frame count" << std::endl;
-      if ((*in_ctx->packets).size() < frames.size())
-      {
-        std::cout << "Warning: more frames than packets, frames will be skipped" << std::endl;
-      }
-      else
-      {
-        std::cout << "Warning: more packets than frames, frames will be duplicated" << std::endl;
-        for (int i = frames.size(); i < (*in_ctx->packets).size(); i++)
-        {
-          frames.push_back(av_frame_clone(frames.back()));
-        }
-      }
-    }
-
-    // sort packets by pts (because some idiot decided to make B frames)
-    std::sort((*in_ctx->packets).begin(), (*in_ctx->packets).end(), [](const AVPacket *a, const AVPacket *b) -> bool
-              { return a->pts < b->pts; });
-
-    // TODO: check if all this is needed, seems like a lot of work for nothing
-    // Open encoder
-    AVCodecContext *encoder = create_encoder_context(metadata, quality);
-
-    auto current_segment_cut = segment_cuts.begin();
-    bool cut_has_keyframe = false;
-    bool new_encoder = false;
-
-    for (int i = 0; i < frames.size(); i++)
-    {
-      AVFrame *frame = frames[i];
-      AVPacket *packet = (*in_ctx->packets)[i];
-
-      int64_t packet_start_time = packet->pts;
-      int64_t packet_end_time = packet->pts + packet->duration;
-
-      // seek next segment cut
-      while (current_segment_cut != segment_cuts.end() && current_segment_cut->end < packet_start_time)
-      {
-        if (current_segment_cut == segment_cuts.end() - 1)
-        {
-          break;
-        }
-        current_segment_cut++;
-        cut_has_keyframe = false;
-        new_encoder = true;
-      }
-      if (new_encoder)
-      {
-        // close old encoder
-        avcodec_free_context(&encoder);
-        // open new encoder
-        encoder = create_encoder_context(metadata, quality);
-      }
-
-      // check if we're in a cut
-      if (packet_end_time >= current_segment_cut->start && packet_start_time <= current_segment_cut->end)
-      {
-        // we're in a cut, send the frame to the encoder
-
-        // if we haven't exported a keyframe yet, check if we can use the original one or
-        // if we need to make a new one
-        if (!cut_has_keyframe)
-        {
-          frame->pict_type = AV_PICTURE_TYPE_I;
-          cut_has_keyframe = true;
-        }
-        av_frame_make_writable(frame);
-        if ((ret = avcodec_send_frame(encoder, frame)) != 0)
-        {
-          av_make_error_string(errbuff, 64, ret);
-          std::cout << "Error sending frame: " << errbuff << std::endl;
-          exit(1);
-        }
-        av_frame_free(&frame);
-        AVPacket *encoded_packet = new AVPacket[1];
-        av_init_packet(encoded_packet);
-        if ((ret = avcodec_receive_packet(encoder, encoded_packet)) != 0)
-        {
-          if (ret != AVERROR(EAGAIN))
-          {
-            av_make_error_string(errbuff, 64, ret);
-            std::cout << "Error receiving packet: " << errbuff << std::endl;
-            exit(1);
-          }
-          std::cout << "No packet received" << std::endl;
+          time_skipped += packet->duration;
           continue;
         }
-        encoded_packet->pts = packet->pts - time_skipped;
-        encoded_packet->dts = encoded_packet->pts;
-        out_ctx->packets->push_back(encoded_packet);
-      }
-      else
-      {
-        time_skipped += packet->duration;
-      }
 
-      av_packet_free(&packet);
+        // find the cut from the list of cuts in this segment that this packet falls into
+        auto cut = std::find_if(segment_cuts.begin(), segment_cuts.end(), [packet](local_cut &cut) {
+          return packet->pts + packet->duration > cut.start && packet->pts < cut.end;
+        });
+
+        bool is_pkt_in_cut = cut == segment_cuts.end();
+
+        if (is_pkt_in_cut) // if packet is NOT within a cut that's to be kept
+        {
+          packet->dts -= time_skipped;
+          packet->pts = AV_NOPTS_VALUE; // -= time_skipped; // Using no pts at all so video player seek bars do not break
+          packet->flags |= AV_PKT_FLAG_DISCARD; // use packet for decoding but do not display it
+          time_skipped += packet->duration;
+        } 
+        else /* if (cut != segment_cuts.end()) */ { // if packet is within in a cut that's to be kept
+          int64_t time_delta_cut_and_first_pkt = packet->pts - cut->start;
+          int64_t time_delta_last_pkt_and_cut = (cut->end - 1) - packet->pts;
+          bool is_frame_first_in_cut = packet->pts <= cut->start;
+          bool is_frame_last_in_cut = time_delta_last_pkt_and_cut < packet->duration;
+          // check if this is the first frame in the cut, and if so decrease dts and pts by difference between cut start and frame pts
+          if (is_frame_first_in_cut)
+            time_skipped -= time_delta_cut_and_first_pkt; // the time from the start of the packet which starts within or hangs over the start of the cut is added to the time skipped
+          // check if this is the last frame in the cut, and if so decrease dts and pts of the next frame by difference between cut end and frame pts
+          if (is_frame_last_in_cut)
+            time_skipped -= -(time_delta_last_pkt_and_cut + 1 - packet->duration); // the time the frame hangs over the end of the cut is subtracted from the skipped time
+          packet->dts -= time_skipped;
+          packet->pts -= time_skipped;
+        }
+
+        // TODO: maybe find a nicer solution for this. But for now it is required to ensure monotonic dts.
+        if (packet->dts <= dts_previous) { // if decoding timestamps are not strictly monotonically rising
+          if (!is_pkt_in_cut) {
+            int64_t inv_delta_dts = dts_previous - packet->dts;
+            packet->pts += inv_delta_dts + 1;
+          }
+          packet->dts = dts_previous + 1;
+        }
+        dts_previous = packet->dts;
+
+        out_ctx->packets->push_back(packet);
+      }
+      output_queue->push(out_ctx);
     }
-
-    // delete in_ctx->packets;
-    // delete in_ctx;
-    output_queue->push(out_ctx);
   }
+
+  cout_sync << "Centiseconds kept in thread #" << std::this_thread::get_id() << " up until the start of the last segment: " << centiseconds_kept_before_seg << std::endl;
 
   output_queue->set_done(queue_id);
 }
