@@ -11,6 +11,8 @@
   #pragma warning Unknown dynamic link export semantics.
 #endif
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -23,8 +25,8 @@ extern "C" {
 
   struct cut
   {
-    double start;
-    double end;
+    int64_t start;
+    int64_t end;
   };
 
   struct cut_list
