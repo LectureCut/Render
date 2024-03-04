@@ -1,7 +1,6 @@
 <div align="center" style="display: grid; grid-template-columns: 1fr 100px 1fr; gap: 10px">
   <span></span>
   <img src=".github/static/Logo.svg" width=100/>
-  <span style="font-family: Roboto Flex, Roboto; font-size: 1.5em; align-self: end; justify-self: left">Render</span>
 </div>
 
 ---
