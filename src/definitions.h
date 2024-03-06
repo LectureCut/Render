@@ -3,6 +3,8 @@
 #define VERSION "0.1.0"
 #define DEFAULT_FFMPEG_LOG_LEVEL "error"
 
+#define PRINT_VERBOSE 0
+
 #ifdef _WIN32
 #define popen _popen
 #define pclose _pclose

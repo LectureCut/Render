@@ -14,7 +14,11 @@ const char* version(error_callback* _)
 
 void init(error_callback* _)
 {
+  #if PRINT_VERBOSE
   av_log_set_level(AV_LOG_VERBOSE);
+  #else
+  av_log_set_level(AV_LOG_ERROR);
+  #endif
   
   avformat_network_init();
 }

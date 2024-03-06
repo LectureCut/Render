@@ -1,4 +1,5 @@
 #include "pipeline.h"
+#include "../definitions.h"
 #include <ranges>
 #include <syncstream>
 #include <thread>
@@ -49,7 +50,11 @@ void transcode_audio(
   }
   auto cut_current = cuts.begin();
 
-  std::cout << "Audio Timebase: " << native_stream_timebase.num << "/" << native_stream_timebase.den << std::endl;
+  #if PRINT_VERBOSE
+  { // DEBUGGING
+    cout_sync << "Audio Timebase: " << native_stream_timebase.num << "/" << native_stream_timebase.den << std::endl;
+  }
+  #endif
 
   // loop prep
   QUEUE_ITEM *in_ctx = new QUEUE_ITEM();
