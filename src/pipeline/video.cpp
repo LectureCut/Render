@@ -167,16 +167,13 @@ void transcode_video(
         dts_prev = packet->dts;
       }
 
-      // set it to the latest dts in the segment as it will only ever be read in partially cut segments
-      dts_prev = (*((*in_ctx->packets).end()-1))->dts;
-
       #if PRINT_VERBOSE
       { // DEBUGGING
         const static size_t decimal_digits_in_int64_t = std::to_string(std::numeric_limits<int64_t>::max()).length();
         char fill = '.';
         cout_sync.fill(fill);
         cout_sync << std::endl;
-        cout_sync << std::format("{:>14}", "Segment Info") << " | Keeping as is" << std::endl;
+        cout_sync << std::format("{:>14}", "Segment Info") << " | Video | Keeping as is" << std::endl;
         cout_sync << std::endl;
         cout_sync << std::format("{:>14}", "Cut Info") << 
           " | Time discarded by now:" << fill << std::setw(decimal_digits_in_int64_t) << time_discarded_before_first_and_only_cut_in_segment <<
@@ -255,52 +252,52 @@ void transcode_video(
       // initialize variable to store the sum of time from all cuts passed in the segment
       int64_t time_of_complete_cuts_kept_within_segment = 0;
       for (
-        auto cut_current = segment_cuts.begin();
-        cut_current != segment_cuts.end();
-        cut_current++
+        size_t cut_idx = 0; 
+        auto &cut_current : segment_cuts
       ) {
-        size_t cut_idx = cut_current-segment_cuts.begin();
-        time_discarded_before_cuts[cut_idx] = cut_current->start - (time_of_complete_cuts_kept_before_segment + time_of_complete_cuts_kept_within_segment);
-        time_of_complete_cuts_kept_within_segment += cut_current->end - cut_current->start;
+        time_discarded_before_cuts[cut_idx] = cut_current.start - (time_of_complete_cuts_kept_before_segment + time_of_complete_cuts_kept_within_segment);
+        time_of_complete_cuts_kept_within_segment += cut_current.end - cut_current.start;
 
         time_video_delay_before_cuts[cut_idx] = time_video_delay_prev;
         // determine how much later the end of the cut occurs compared to the end of the last packet falling in it
         // requires searching for the first displayable packet from the end of the cut first
-        if (cut_current->end <= segment_end) {
+        if (cut_current.end <= segment_end) {
           auto it = packets_sorted_pts_chunked_by_cut_starts[cut_idx].rbegin();
           for (;
-           it != packets_sorted_pts_chunked_by_cut_starts[cut_idx].rend() 
-           && (
-            ((*it)->flags & AV_PKT_FLAG_DISPOSABLE) == AV_PKT_FLAG_DISPOSABLE || 
-            ((*it)->flags & AV_PKT_FLAG_DISCARD) == AV_PKT_FLAG_DISCARD || 
-            (*it)->pts == AV_NOPTS_VALUE
+           it != packets_sorted_pts_chunked_by_cut_starts[cut_idx].rend() && // continue while still within the bounds of the container 
+           ( // and the current packet is not going to be displayed, because
+            (((*it)->flags & (AV_PKT_FLAG_DISPOSABLE | AV_PKT_FLAG_DISCARD)) != 0) || // it is either going to be deleted, not going to be displayed or
+            (*it)->pts == AV_NOPTS_VALUE // has no presentation timestamp
            );
            it++
-          ) { }
+          ) { /* do nothing */ }
+          // if a displayable packet was found
           if (it != packets_sorted_pts_chunked_by_cut_starts[cut_idx].rend()) {
             auto last_packet_in_cut = *it;
             auto end_pts_of_last_packet_in_cut = last_packet_in_cut->pts + last_packet_in_cut->duration;
-            time_video_delay_prev = cut_current->end - end_pts_of_last_packet_in_cut;
+            time_video_delay_prev = cut_current.end - end_pts_of_last_packet_in_cut;
           } 
         }
         // determine how much sooner the start of the first packet falling into a cut occurs compared to the start of that cut
         // requires searching for the first displayable packet from the start of the cut first
-        if (cut_current->start >= segment_start) {
+        if (cut_current.start >= segment_start) {
           auto it = packets_sorted_pts_chunked_by_cut_starts[cut_idx].begin();
           for (;
-            it != packets_sorted_pts_chunked_by_cut_starts[cut_idx].end() 
-            && (
-              ((*it)->flags & AV_PKT_FLAG_DISPOSABLE) == AV_PKT_FLAG_DISPOSABLE || 
-              ((*it)->flags & AV_PKT_FLAG_DISCARD) == AV_PKT_FLAG_DISCARD || 
-              (*it)->pts == AV_NOPTS_VALUE
+            it != packets_sorted_pts_chunked_by_cut_starts[cut_idx].end() && // continue while still within the bounds of the container 
+            ( // and the current packet is not going to be displayed, because
+              (((*it)->flags & (AV_PKT_FLAG_DISPOSABLE | AV_PKT_FLAG_DISCARD)) != 0) || // it is either going to be deleted, not going to be displayed or
+              (*it)->pts == AV_NOPTS_VALUE // has no presentation timestamp
             );
             it++
-          ) { }
+          ) { /* do nothing */ }
+          // if a displayable packet was found
           if (it != packets_sorted_pts_chunked_by_cut_starts[cut_idx].end()) {
             auto first_packet_in_cut = *it;
-            time_video_delay_before_cuts[cut_idx] += first_packet_in_cut->pts - cut_current->start;
+            time_video_delay_before_cuts[cut_idx] += first_packet_in_cut->pts - cut_current.start;
           }
         }
+
+        cut_idx++;
       }
 
       // shift all timestamps by the offset appropriate for the cut they're in
@@ -329,8 +326,7 @@ void transcode_video(
           packet++
         ) {
           bool packet_not_displayed = 
-            ((*packet)->flags & AV_PKT_FLAG_DISPOSABLE) == AV_PKT_FLAG_DISPOSABLE || 
-            ((*packet)->flags & AV_PKT_FLAG_DISCARD) == AV_PKT_FLAG_DISCARD || 
+            (((*packet)->flags & (AV_PKT_FLAG_DISPOSABLE | AV_PKT_FLAG_DISCARD)) != 0) || 
             (*packet)->pts == AV_NOPTS_VALUE;
           // if the packet is one that will be displayed
           if (!packet_not_displayed) {
@@ -372,7 +368,7 @@ void transcode_video(
           char fill = '.';
           cout_sync.fill(fill);
           cout_sync << std::endl;
-          cout_sync << std::format("{:>14}", "Segment Info") << " | Cutting up" << std::endl;
+          cout_sync << std::format("{:>14}", "Segment Info") << " | Video | Cutting up" << std::endl;
           cout_sync << std::endl;
           cout_sync << std::format("{:>14}", "Cut Info") << 
             " | Time discarded by now:" << fill << std::setw(decimal_digits_in_int64_t) << time_discarded_before_cuts[cut_idx] << 
