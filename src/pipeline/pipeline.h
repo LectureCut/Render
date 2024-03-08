@@ -49,25 +49,25 @@ public:
     return true;
   }
 
-  int size() {
-    std::lock_guard<std::mutex> lock(mutex);
-    return queue.size();
+  size_t size() {
+     std::lock_guard<std::mutex> lock(mutex);
+     return queue.size();
   }
 
-  int set_working() {
+  size_t set_working() {
     std::lock_guard<std::mutex> lock(mutex);
     done.push_back(false);
     return done.size() - 1;
   }
 
-  void set_done(int index) {
+  void set_done(size_t index) {
     std::unique_lock<std::mutex> lock(mutex);
     done[index] = true;
     lock.unlock();
     cv.notify_one();
   }
 
-  bool is_done() {
+  bool all_done() {
     std::lock_guard<std::mutex> lock(mutex);
     return std::all_of(done.begin(), done.end(), [](bool x){ return x; });
   }

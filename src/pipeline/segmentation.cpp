@@ -11,15 +11,15 @@ void segment(
   PIPELINE_QUEUE<QUEUE_ITEM, METADATA*> *audio_output_queue
 )
 {
-  int video_queue_id = video_output_queue->set_working();
-  int audio_queue_id = audio_output_queue->set_working();
+  size_t video_queue_id = video_output_queue->set_working();
+  size_t audio_queue_id = audio_output_queue->set_working();
 
-  AVFormatContext *inputFormatContext = NULL;
+  AVFormatContext *inputFormatContext = nullptr;
   AVPacket pkt;
   int videoStreamIndex = -1;
   int audioStreamIndex = -1;
-  std::vector<AVPacket *> *video_packets = NULL;
-  std::vector<AVPacket *> *audio_packets = NULL;
+  std::vector<AVPacket *> *video_packets = nullptr;
+  std::vector<AVPacket *> *audio_packets = nullptr;
 
   if (avformat_open_input(&inputFormatContext, file, NULL, NULL) < 0) {
     throw std::runtime_error("error opening input file");
@@ -59,9 +59,8 @@ void segment(
   metadata->format_ctx = inputFormatContext;
   metadata->video_stream = inputFormatContext->streams[videoStreamIndex];
   metadata->audio_stream = inputFormatContext->streams[audioStreamIndex];
-  METADATA** metadata_ptr = new METADATA*(metadata);
-  video_output_queue->set_special(metadata_ptr);
-  audio_output_queue->set_special(metadata_ptr);
+  audio_output_queue->set_special(&metadata);
+  video_output_queue->set_special(&metadata);
 
   while (av_read_frame(inputFormatContext, &pkt) == 0) {
     if (pkt.stream_index != videoStreamIndex && pkt.stream_index != audioStreamIndex)
